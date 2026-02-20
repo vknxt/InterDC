@@ -1,0 +1,89 @@
+# ============================================================
+# InterDC Configuration
+# ============================================================
+
+# Default guild used when creating a new screen.
+default-guild-id: "guild-demo"
+
+# ------------------------------------------------------------
+# Discord Gateway
+# ------------------------------------------------------------
+discord:
+  # Enable real Discord integration.
+  enabled: false
+
+  # Bot token from Discord Developer Portal.
+  bot-token: ""
+
+  # Gateway implementation: jda
+  gateway: "jda"
+
+# ------------------------------------------------------------
+# Optional WebSocket Bridge
+# ------------------------------------------------------------
+websocket:
+  enabled: false
+  endpoint: "ws://localhost:8080/interdc"
+
+# ------------------------------------------------------------
+# Plugin Messages / Locale
+# ------------------------------------------------------------
+messages:
+  # Default plugin locale.
+  default-locale: "en_us"
+
+  # If true, message locale follows player client language
+  # (unless player has a manual /dc lang override).
+  use-client-locale: true
+
+# ------------------------------------------------------------
+# Screen Settings
+# ------------------------------------------------------------
+screen:
+  default-width: 3
+  default-height: 3
+  max-width: 8
+  max-height: 8
+
+  # Max interaction distance (blocks) when targeting the panel.
+  interaction-distance: 10
+
+# ------------------------------------------------------------
+# Fly Assist
+# ------------------------------------------------------------
+fly-assist:
+  enabled: true
+
+  # Minimum tile count required to activate fly assist.
+  min-tiles: 9
+
+  # Assist bounds around panel volume.
+  back-distance: 4.0
+  front-distance: 1.5
+  side-margin: 1.5
+  vertical-margin: 1.5
+
+  # Extra tolerance and debounce before disabling assist.
+  exit-buffer: 1.25
+  outside-checks-before-disable: 3
+
+# ------------------------------------------------------------
+# Automatic Updates (Modrinth)
+# ------------------------------------------------------------
+auto-update:
+  enabled: true
+
+  # Official Modrinth project slug/id.
+  project-id: "interdc"
+
+  # release | beta | alpha
+  release-channel: "release"
+
+  # Leave empty to auto-detect from server version.
+  game-version: ""
+
+  loaders:
+    - "paper"
+
+  # Download update to plugins/update for next restart.
+  download: true

@@ -1,0 +1,21 @@
+# Gradle/Kotlin
+.gradle/
+build/
+out/
+
+# IDE
+.idea/
+*.iml
+
+# Local/dev runtime
+dev-server/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+
+# Logs
+*.log

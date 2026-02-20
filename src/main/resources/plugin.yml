@@ -1,0 +1,22 @@
+name: InterDC
+version: '${version}'
+main: com.interdc.InterDCPlugin
+api-version: '1.21'
+author: InterDC
+
+# Optional plugin integrations
+softdepend:
+  - floodgate
+  - Geyser-Spigot
+
+commands:
+  interdc:
+    description: Main InterDC command
+    usage: /interdc (or /dc) <create|link|link2|lockchannel|webhook|remove|reload|move|lang>
+    aliases:
+      - dc
+
+permissions:
+  interdc.admin:
+    description: Allows managing InterDC screens
+    default: op
