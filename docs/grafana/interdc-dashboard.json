@@ -1,0 +1,71 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Screens Total",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "interdc_screens_total", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Render Hit Rate %",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "interdc_render_hit_rate_percent", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Avg Render ms",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "interdc_render_avg_ms", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "stat",
+      "title": "Render Requests Total",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "interdc_render_requests_total", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Discord Message Events / min",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [{"expr": "sum(rate(interdc_discord_messages_total[1m]))", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Discord Channel Updates / min",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{"expr": "sum(rate(interdc_discord_channel_updates_total[1m]))", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Render Cache Hits vs Misses / min",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "targets": [
+        {"expr": "rate(interdc_render_cache_hits_total[1m])", "legendFormat": "hits", "refId": "A"},
+        {"expr": "rate(interdc_render_cache_misses_total[1m])", "legendFormat": "misses", "refId": "B"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Screens by Guild",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [{"expr": "interdc_screens_by_guild", "legendFormat": "{{guild}}", "refId": "A"}]
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["interdc", "minecraft", "discord"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timezone": "browser",
+  "title": "InterDC Observability",
+  "version": 1
+}

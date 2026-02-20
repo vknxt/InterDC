@@ -1,5 +1,6 @@
 name: InterDC
 version: '${version}'
+description: Discord in Minecraft with interactive screens, live sync, visual presets, health diagnostics and Bedrock-ready support.
 main: com.interdc.InterDCPlugin
 api-version: '1.21'
 author: InterDC
@@ -12,7 +13,7 @@ softdepend:
 commands:
   interdc:
     description: Main InterDC command
-    usage: /interdc (or /dc) <create|link|link2|lockchannel|webhook|remove|reload|move|lang>
+    usage: /interdc (or /dc) <create|link|link2|style|perf|health|lockchannel|webhook|remove|reload|move|lang>
     aliases:
       - dc
 

@@ -1,5 +1,7 @@
 package com.interdc.render
 
+import com.github.benmanes.caffeine.cache.Cache
+import com.github.benmanes.caffeine.cache.Caffeine
 import com.interdc.core.GuildConfigService
 import com.interdc.discord.DiscordGateway
 import com.interdc.discord.DiscordMember
@@ -13,11 +15,12 @@ import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.net.URI
 import java.net.URLEncoder
+import java.net.URLConnection
 import java.nio.charset.StandardCharsets
 import java.text.Normalizer
+import java.time.Duration
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.concurrent.ConcurrentHashMap
 import javax.imageio.ImageIO
 import java.awt.geom.Ellipse2D
 import java.awt.geom.RoundRectangle2D
@@ -29,9 +32,16 @@ class DiscordCanvasService(
     private val discordGateway: DiscordGateway
 ) {
 
-    private data class CachedImage(
-        val image: BufferedImage,
-        var lastAccessEpochMs: Long
+    private data class VisualStylePreset(
+        val backgroundBlend: Double,
+        val sidebarBlend: Double,
+        val guildRailBlend: Double,
+        val cardBlend: Double,
+        val accentBlend: Double,
+        val chatGradientAlpha: Int,
+        val sidebarGradientAlpha: Int,
+        val topOverlayAlpha: Int,
+        val guildHeaderAlpha: Int
     )
 
     companion object {
@@ -39,6 +49,9 @@ class DiscordCanvasService(
         private const val AVATAR_CACHE_TTL_MS = 30 * 60 * 1000L
         private const val FAILED_AVATAR_TTL_MS = 10 * 60 * 1000L
         private const val MAX_FAILED_CACHE_ENTRIES = 256
+        private const val IMAGE_CONNECT_TIMEOUT_MS = 3_000
+        private const val IMAGE_READ_TIMEOUT_MS = 5_000
+        private const val IMAGE_FETCH_ATTEMPTS = 2
 
         private val TOKEN_REGEX = Regex("\\S+|\\s+")
         private val WHITESPACE_REGEX = Regex("\\s+")
@@ -56,19 +69,21 @@ class DiscordCanvasService(
     }
 
     private val hourFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
-    private val avatarImageCache = ConcurrentHashMap<String, CachedImage>()
-    private val failedAvatarUrls = ConcurrentHashMap<String, Long>()
+    private val avatarImageCache: Cache<String, BufferedImage> = Caffeine.newBuilder()
+        .maximumSize(MAX_AVATAR_CACHE_ENTRIES.toLong())
+        .expireAfterAccess(Duration.ofMillis(AVATAR_CACHE_TTL_MS))
+        .build()
+    private val failedAvatarUrls: Cache<String, Long> = Caffeine.newBuilder()
+        .maximumSize(MAX_FAILED_CACHE_ENTRIES.toLong())
+        .expireAfterWrite(Duration.ofMillis(FAILED_AVATAR_TTL_MS))
+        .build()
 
     fun render(screen: InterDCScreen, locale: String = "en_us"): BufferedImage {
         val widthPx = screen.width * 128
         val heightPx = screen.height * 128
         val totalTiles = screen.width * screen.height
-        val qualityScale = when {
-            totalTiles <= 4 -> 4
-            totalTiles <= 9 -> 3
-            totalTiles <= 16 -> 2
-            else -> 1
-        }
+        val performanceMode = guildConfigService.renderPerformanceMode()
+        val qualityScale = resolveQualityScale(totalTiles, performanceMode)
         val workingImage = BufferedImage(
             widthPx * qualityScale,
             heightPx * qualityScale,
@@ -80,29 +95,30 @@ class DiscordCanvasService(
             g.scale(qualityScale.toDouble(), qualityScale.toDouble())
         }
 
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
-        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
-        g.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_QUALITY)
-        g.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON)
-        g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_NORMALIZE)
+        applyRenderHints(g, performanceMode)
 
         val allGuilds = discordGateway.guilds()
         val activeGuild = screen.guildId?.let { id -> allGuilds.firstOrNull { it.id == id } } ?: allGuilds.firstOrNull()
         val activeGuildId = activeGuild?.id
 
         val theme = guildConfigService.getTheme(activeGuildId)
+        val style = stylePreset(theme.layout)
         val discordBg = Color.fromRGB(49, 51, 56)
         val discordSidebar = Color.fromRGB(43, 45, 49)
         val discordGuildRail = Color.fromRGB(30, 31, 34)
         val discordCard = Color.fromRGB(56, 58, 64)
         val discordAccent = Color.fromRGB(88, 101, 242)
-        val baseBackground = mix(theme.backgroundColor, discordBg, 0.58)
-        val baseSidebar = mix(theme.sidebarColor, discordSidebar, 0.62)
-        val baseGuildRail = mix(theme.sidebarColor, discordGuildRail, 0.75)
-        val baseCard = mix(theme.messageColor, discordCard, 0.55)
-        val baseAccent = mix(theme.primaryColor, discordAccent, 0.45)
+        val baseBackground = mix(theme.backgroundColor, discordBg, style.backgroundBlend)
+        val baseSidebar = mix(theme.sidebarColor, discordSidebar, style.sidebarBlend)
+        val baseGuildRail = mix(theme.sidebarColor, discordGuildRail, style.guildRailBlend)
+        val baseCard = mix(theme.messageColor, discordCard, style.cardBlend)
+        val baseAccent = mix(theme.primaryColor, discordAccent, style.accentBlend)
+        val textPrimary = bestTextColor(baseBackground)
+        val textSecondary = bestMutedTextColor(baseBackground)
+        val textSidebarPrimary = bestTextColor(baseSidebar)
+        val textSidebarSecondary = bestMutedTextColor(baseSidebar)
+        val textOnCard = bestTextColor(baseCard)
+        val textOnCardMuted = bestMutedTextColor(baseCard)
         val guild = activeGuild
         val channels = activeGuildId?.let { discordGateway.channels(it) }.orEmpty()
         val selectedChannel = channels.firstOrNull { it.id == screen.channelId }
@@ -153,7 +169,17 @@ class DiscordCanvasService(
             height = heightPx - topBarHeight,
             topColor = adjust(baseBackground, 6),
             bottomColor = baseBackground,
-            alpha = 36
+            alpha = style.chatGradientAlpha
+        )
+        fillVerticalGradient(
+            g = g,
+            x = chatStartX,
+            y = topBarHeight,
+            width = chatWidth,
+            height = max(1, heightPx - topBarHeight),
+            topColor = mix(baseAccent, Color.WHITE, 0.2),
+            bottomColor = baseBackground,
+            alpha = 16
         )
 
         if (showMemberPanel) {
@@ -168,19 +194,19 @@ class DiscordCanvasService(
             height = heightPx,
             topColor = adjust(baseSidebar, 8),
             bottomColor = baseSidebar,
-            alpha = 24
+            alpha = style.sidebarGradientAlpha
         )
 
-        g.color = awt(adjust(baseBackground, 9), 32)
+        g.color = awt(adjust(baseBackground, 9), style.topOverlayAlpha)
         g.fillRoundRect(chatStartX + 4, topBarHeight + 6, chatWidth - 8, 18, 8, 8)
 
-        g.color = java.awt.Color(255, 255, 255, 18)
+        g.color = java.awt.Color(255, 255, 255, style.guildHeaderAlpha)
         g.fillRoundRect(guildRailWidth + 6, 4, channelPanelWidth - 12, 18, 8, 8)
 
-        g.color = java.awt.Color(255, 255, 255, 16)
+        g.color = java.awt.Color(255, 255, 255, 22)
         g.drawLine(guildRailWidth, 0, guildRailWidth, heightPx)
         g.drawLine(chatStartX, 0, chatStartX, heightPx)
-        g.color = java.awt.Color(255, 255, 255, 22)
+        g.color = java.awt.Color(255, 255, 255, 28)
         g.drawLine(chatStartX, topBarHeight - 1, chatStartX + chatWidth, topBarHeight - 1)
         if (showMemberPanel) {
             g.drawLine(widthPx - memberPanelWidth, 0, widthPx - memberPanelWidth, heightPx)
@@ -190,7 +216,7 @@ class DiscordCanvasService(
         g.color = java.awt.Color(0, 0, 0, 80)
         g.font = FONT_11_BOLD
         g.drawString(truncate(guildName, 20), guildRailWidth + 8, 17)
-        g.color = java.awt.Color.WHITE
+        g.color = textSidebarPrimary
         g.font = FONT_11_BOLD
         g.drawString(truncate(guildName, 20), guildRailWidth + 8, 16)
 
@@ -222,7 +248,7 @@ class DiscordCanvasService(
             .groupBy { it.categoryName!! }
 
         fun drawCategory(title: String, entries: List<com.interdc.discord.DiscordChannel>) {
-            g.color = java.awt.Color(160, 165, 178)
+            g.color = textSidebarSecondary
             g.font = FONT_9_BOLD
             val safeCategory = normalizeUiText(title)
             g.drawString(truncate(safeCategory.uppercase(), 16), guildRailWidth + 8, channelY)
@@ -239,7 +265,7 @@ class DiscordCanvasService(
                     g.color = awt(baseAccent)
                     g.fillRoundRect(guildRailWidth + 6, channelY - 10, 3, 14, 3, 3)
                 }
-                g.color = if (channel.canTalk) java.awt.Color(218, 220, 226) else java.awt.Color(130, 133, 145)
+                g.color = if (channel.canTalk) textSidebarPrimary else textSidebarSecondary
                 g.font = if (channel.id == selectedChannel?.id) {
                     FONT_10_BOLD
                 } else {
@@ -265,13 +291,13 @@ class DiscordCanvasService(
             drawCategory(category, entries)
         }
 
-        g.color = java.awt.Color(245, 245, 246)
+        g.color = textPrimary
         g.font = FONT_11_BOLD
         val selectedChannelLabel = normalizeUiText(selectedChannel?.name ?: tr(locale, "unlinked"))
         g.drawString("# ${truncate(selectedChannelLabel, 24)}", chatStartX + 8, 16)
 
         g.font = FONT_9_PLAIN
-        g.color = java.awt.Color(166, 170, 181)
+        g.color = textSecondary
         val summary = if (messages.isEmpty()) {
             tr(locale, "no-messages")
         } else {
@@ -287,7 +313,7 @@ class DiscordCanvasService(
             drawSoftShadow(g, buttonX, buttonY, buttonWidth, buttonHeight, 7)
             g.color = if (showMemberPanel) awt(adjust(baseAccent, -6), 220) else awt(adjust(baseCard, 10), 210)
             g.fillRoundRect(buttonX, buttonY, buttonWidth, buttonHeight, 7, 7)
-            g.color = if (showMemberPanel) java.awt.Color.WHITE else java.awt.Color(214, 217, 223)
+            g.color = if (showMemberPanel) bestTextColor(baseAccent) else textPrimary
             g.font = FONT_9_BOLD
             val buttonText = if (showMemberPanel) tr(locale, "hide-members") else tr(locale, "show-members")
             g.drawString(truncateByWidth(g, buttonText, buttonWidth - 10), buttonX + 5, buttonY + 10)
@@ -380,17 +406,17 @@ class DiscordCanvasService(
             }
 
             g.font = FONT_10_BOLD
-            g.color = java.awt.Color(255, 255, 255)
+            g.color = textOnCard
             g.drawString(truncate(message.author, 16), contentStartX, bubbleTop + 14)
 
             g.font = FONT_9_PLAIN
-            g.color = java.awt.Color(180, 184, 195)
+            g.color = textOnCardMuted
             val timeText = formatTime(message.timestamp)
             val timeWidth = g.fontMetrics.stringWidth(timeText)
             g.drawString(timeText, bubbleX + bubbleWidth - timeWidth - 8, bubbleTop + 14)
 
             g.font = FONT_10_PLAIN
-            g.color = java.awt.Color(220, 222, 228)
+            g.color = textOnCard
             var lineY = bubbleTop + 26
             wrapped.forEach { line ->
                 drawMessageLine(g, line, contentStartX, lineY)
@@ -428,7 +454,7 @@ class DiscordCanvasService(
             g.drawString("+", inputX + 8, inputY + 16)
         }
 
-        g.color = if (canSend) java.awt.Color(190, 195, 205) else java.awt.Color(150, 154, 165)
+        g.color = if (canSend) textSecondary else textSidebarSecondary
         g.font = FONT_10_PLAIN
         val inputHint = if (canSend) {
             tr(locale, "input-chat")
@@ -438,22 +464,21 @@ class DiscordCanvasService(
         g.drawString(truncateByWidth(g, inputHint, inputWidth - 24), inputX + 20, inputY + 15)
 
         if (showMemberPanel) {
-            g.color = java.awt.Color(236, 238, 243)
+            g.color = textSidebarPrimary
             g.font = FONT_9_BOLD
             g.drawString(tr(locale, "members-title").uppercase(), widthPx - memberPanelWidth + 8, 16)
 
             g.font = FONT_9_PLAIN
-            g.color = java.awt.Color(180, 183, 192)
+            g.color = textSidebarSecondary
             g.drawString("${tr(locale, "online")} • ${members.size}", widthPx - memberPanelWidth + 8, 30)
 
             var memberY = 44
             val avatarSize = 16
             val memberNameX = widthPx - memberPanelWidth + 8 + avatarSize + 6
-            val roleColor = java.awt.Color(158, 162, 173)
             val roleWidth = memberPanelWidth - (avatarSize + 20)
 
             if (members.isEmpty()) {
-                g.color = java.awt.Color(180, 183, 192)
+                g.color = textSidebarSecondary
                 g.drawString(tr(locale, "no-members"), widthPx - memberPanelWidth + 8, memberY)
             }
 
@@ -472,14 +497,14 @@ class DiscordCanvasService(
                 )
 
                 g.font = FONT_9_BOLD
-                g.color = java.awt.Color(224, 226, 231)
+                g.color = textSidebarPrimary
                 g.drawString(truncateByWidth(g, member.name, roleWidth), memberNameX, memberY - 1)
 
                 g.color = awt(baseAccent, 220)
                 g.fillOval(memberNameX + roleWidth - 5, memberY - 8, 4, 4)
 
                 g.font = FONT_8_PLAIN
-                g.color = roleColor
+                g.color = textSidebarSecondary
                 val role = member.roles.firstOrNull() ?: tr(locale, "no-role")
                 g.drawString(truncateByWidth(g, role, roleWidth), memberNameX, memberY + 9)
 
@@ -767,66 +792,39 @@ class DiscordCanvasService(
 
     private fun loadImageUrl(rawUrl: String?): BufferedImage? {
         val url = normalizeImageUrl(rawUrl) ?: return null
-        val now = System.currentTimeMillis()
-
-        avatarImageCache[url]?.let {
-            it.lastAccessEpochMs = now
-            return it.image
+        avatarImageCache.getIfPresent(url)?.let { return it }
+        if (failedAvatarUrls.getIfPresent(url) != null) {
+            return null
         }
 
-        val failedAt = failedAvatarUrls[url]
-        if (failedAt != null) {
-            if (now - failedAt < FAILED_AVATAR_TTL_MS) {
-                return null
-            }
-            failedAvatarUrls.remove(url, failedAt)
-        }
-
-        val loaded = runCatching {
-            ImageIO.read(URI(url).toURL())
-        }.getOrNull()
+        val loaded = fetchImageWithRetry(url)
 
         if (loaded != null) {
-            avatarImageCache[url] = CachedImage(loaded, now)
-            trimAvatarCache(now)
+            avatarImageCache.put(url, loaded)
             return loaded
         }
 
-        failedAvatarUrls[url] = now
-        trimFailedAvatarCache(now)
+        failedAvatarUrls.put(url, System.currentTimeMillis())
         return null
     }
 
-    private fun trimAvatarCache(now: Long) {
-        avatarImageCache.entries
-            .filter { now - it.value.lastAccessEpochMs > AVATAR_CACHE_TTL_MS }
-            .forEach { (key, _) -> avatarImageCache.remove(key) }
-
-        val overflow = avatarImageCache.size - MAX_AVATAR_CACHE_ENTRIES
-        if (overflow <= 0) {
-            return
+    private fun fetchImageWithRetry(url: String): BufferedImage? {
+        repeat(IMAGE_FETCH_ATTEMPTS) {
+            val loaded = runCatching { downloadImage(url) }.getOrNull()
+            if (loaded != null) {
+                return loaded
+            }
         }
-
-        avatarImageCache.entries
-            .sortedBy { it.value.lastAccessEpochMs }
-            .take(overflow)
-            .forEach { (key, _) -> avatarImageCache.remove(key) }
+        return null
     }
 
-    private fun trimFailedAvatarCache(now: Long) {
-        failedAvatarUrls.entries
-            .filter { now - it.value > FAILED_AVATAR_TTL_MS }
-            .forEach { (key, _) -> failedAvatarUrls.remove(key) }
-
-        val overflow = failedAvatarUrls.size - MAX_FAILED_CACHE_ENTRIES
-        if (overflow <= 0) {
-            return
+    private fun downloadImage(url: String): BufferedImage? {
+        val connection: URLConnection = URI(url).toURL().openConnection()
+        connection.connectTimeout = IMAGE_CONNECT_TIMEOUT_MS
+        connection.readTimeout = IMAGE_READ_TIMEOUT_MS
+        connection.getInputStream().use { stream ->
+            return ImageIO.read(stream)
         }
-
-        failedAvatarUrls.entries
-            .sortedBy { it.value }
-            .take(overflow)
-            .forEach { (key, _) -> failedAvatarUrls.remove(key) }
     }
 
     private fun normalizeImageUrl(rawUrl: String?): String? {
@@ -982,6 +980,88 @@ class DiscordCanvasService(
         )
     }
 
+    private fun bestTextColor(background: Color): java.awt.Color {
+        val darkBackground = relativeLuminance(background) < 0.42
+        return if (darkBackground) {
+            java.awt.Color(242, 245, 252)
+        } else {
+            java.awt.Color(22, 24, 31)
+        }
+    }
+
+    private fun bestMutedTextColor(background: Color): java.awt.Color {
+        val darkBackground = relativeLuminance(background) < 0.42
+        return if (darkBackground) {
+            java.awt.Color(186, 191, 203)
+        } else {
+            java.awt.Color(88, 93, 106)
+        }
+    }
+
+    private fun relativeLuminance(color: Color): Double {
+        fun channel(value: Int): Double {
+            val v = value / 255.0
+            return if (v <= 0.03928) v / 12.92 else Math.pow((v + 0.055) / 1.055, 2.4)
+        }
+
+        val r = channel(color.red)
+        val g = channel(color.green)
+        val b = channel(color.blue)
+        return (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+    }
+
+    private fun stylePreset(layout: String): VisualStylePreset {
+        return when (layout.trim().lowercase()) {
+            "glass" -> VisualStylePreset(
+                backgroundBlend = 0.42,
+                sidebarBlend = 0.5,
+                guildRailBlend = 0.58,
+                cardBlend = 0.4,
+                accentBlend = 0.35,
+                chatGradientAlpha = 52,
+                sidebarGradientAlpha = 38,
+                topOverlayAlpha = 48,
+                guildHeaderAlpha = 28
+            )
+
+            "ultra" -> VisualStylePreset(
+                backgroundBlend = 0.65,
+                sidebarBlend = 0.75,
+                guildRailBlend = 0.85,
+                cardBlend = 0.60,
+                accentBlend = 0.50,
+                chatGradientAlpha = 70,
+                sidebarGradientAlpha = 50,
+                topOverlayAlpha = 60,
+                guildHeaderAlpha = 40
+            )
+
+            "classic" -> VisualStylePreset(
+                backgroundBlend = 0.2,
+                sidebarBlend = 0.26,
+                guildRailBlend = 0.32,
+                cardBlend = 0.24,
+                accentBlend = 0.12,
+                chatGradientAlpha = 20,
+                sidebarGradientAlpha = 14,
+                topOverlayAlpha = 20,
+                guildHeaderAlpha = 10
+            )
+
+            else -> VisualStylePreset(
+                backgroundBlend = 0.58,
+                sidebarBlend = 0.62,
+                guildRailBlend = 0.75,
+                cardBlend = 0.55,
+                accentBlend = 0.45,
+                chatGradientAlpha = 36,
+                sidebarGradientAlpha = 24,
+                topOverlayAlpha = 32,
+                guildHeaderAlpha = 18
+            )
+        }
+    }
+
     private fun tr(locale: String, key: String, replacements: Map<String, String> = emptyMap()): String {
         val normalized = locale.lowercase()
         val text = when (key) {
@@ -1059,5 +1139,63 @@ class DiscordCanvasService(
         var result = text
         replacements.forEach { (k, v) -> result = result.replace("{$k}", v) }
         return result
+    }
+
+    private fun resolveQualityScale(totalTiles: Int, mode: String): Int {
+        return when (mode) {
+            "quality" -> when {
+                totalTiles <= 4 -> 4
+                totalTiles <= 9 -> 3
+                totalTiles <= 16 -> 2
+                else -> 1
+            }
+
+            "performance" -> when {
+                totalTiles <= 4 -> 2
+                totalTiles <= 9 -> 2
+                else -> 1
+            }
+
+            else -> when {
+                totalTiles <= 4 -> 3
+                totalTiles <= 9 -> 2
+                totalTiles <= 16 -> 2
+                else -> 1
+            }
+        }
+    }
+
+    private fun applyRenderHints(g: Graphics2D, mode: String) {
+        when (mode) {
+            "performance" -> {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF)
+                g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF)
+                g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_SPEED)
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR)
+                g.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_SPEED)
+                g.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_OFF)
+                g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_DEFAULT)
+            }
+
+            "quality" -> {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+                g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+                g.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_QUALITY)
+                g.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON)
+                g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_NORMALIZE)
+            }
+
+            else -> {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+                g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_DEFAULT)
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+                g.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_DEFAULT)
+                g.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON)
+                g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_NORMALIZE)
+            }
+        }
     }
 }

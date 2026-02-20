@@ -5,7 +5,8 @@ plugins {
 }
 
 group = "org.dc"
-version = "1.1"
+version = "1.2"
+description = "InterDC 1.2: Discord in-game screens with live sync, adaptive visual styles, health diagnostics, metrics and Bedrock-ready interaction."
 
 repositories {
     mavenCentral()
@@ -19,6 +20,9 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib-jdk8")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
     implementation("net.dv8tion:JDA:5.2.1")
+    implementation("com.github.ben-manes.caffeine:caffeine:3.1.8")
+    implementation("io.micrometer:micrometer-core:1.12.13")
+    implementation("io.micrometer:micrometer-registry-prometheus:1.12.13")
     implementation("org.xerial:sqlite-jdbc:3.46.1.3")
 }
 

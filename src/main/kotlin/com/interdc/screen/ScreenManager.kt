@@ -1,6 +1,7 @@
 package com.interdc.screen
 
 import com.interdc.InterDCPlugin
+import com.interdc.core.GuildConfigService
 import com.interdc.core.MessageService
 import com.interdc.discord.DiscordGateway
 import com.interdc.render.DiscordCanvasService
@@ -26,7 +27,8 @@ class ScreenManager(
     private val repository: ScreenRepository,
     private val canvasService: DiscordCanvasService,
     private val discordGateway: DiscordGateway,
-    private val messageService: MessageService
+    private val messageService: MessageService,
+    private val guildConfigService: GuildConfigService
 ) {
 
     enum class LinkResult {
@@ -35,19 +37,32 @@ class ScreenManager(
         INVALID_CHANNEL
     }
 
+    sealed class StyleResult {
+        data class Success(val style: String) : StyleResult()
+        data object NotLookingScreen : StyleResult()
+        data object NoGuild : StyleResult()
+        data object InvalidStyle : StyleResult()
+    }
+
     companion object {
         private const val FRAME_TAG_PREFIX = "interdc-screen:"
     }
 
     private val screenRenderVersions = mutableMapOf<String, Long>()
-    private val lastRestoreInfoLogAt = mutableMapOf<String, Long>()
     private val lastRestoreWarningLogAt = mutableMapOf<String, Long>()
-    private val frameHealthTask: BukkitTask = plugin.server.scheduler.runTaskTimer(
-        plugin,
-        Runnable { restoreMissingFrames() },
-        40L,
-        100L
-    )
+    private val frameHealthTask: BukkitTask? = run {
+        val interval = plugin.config.getLong("screen.frame-health-check-interval-ticks", 100L).coerceAtLeast(0L)
+        if (interval <= 0L) {
+            null
+        } else {
+            plugin.server.scheduler.runTaskTimer(
+                plugin,
+                Runnable { restoreMissingFrames() },
+                40L,
+                interval
+            )
+        }
+    }
 
     private data class TilePlacement(
         val tileX: Int,
@@ -287,7 +302,42 @@ class ScreenManager(
     }
 
     fun shutdown() {
-        frameHealthTask.cancel()
+        frameHealthTask?.cancel()
+    }
+
+    fun cycleFocusedScreenStyle(player: Player): StyleResult {
+        val screen = findFocusedScreen(player) ?: return StyleResult.NotLookingScreen
+        val guildId = screen.guildId ?: screen.secondaryGuildId ?: return StyleResult.NoGuild
+
+        val layouts = guildConfigService.supportedLayouts().toList().sorted()
+        val current = guildConfigService.getTheme(guildId).layout
+        val currentIndex = layouts.indexOf(current).takeIf { it >= 0 } ?: 0
+        val next = layouts[(currentIndex + 1) % layouts.size]
+        val applied = guildConfigService.setGuildLayout(guildId, next) ?: return StyleResult.NoGuild
+
+        allScreens().forEach { existing ->
+            if (existing.guildId == guildId || existing.secondaryGuildId == guildId) {
+                markDirty(existing.id)
+            }
+        }
+
+        return StyleResult.Success(applied)
+    }
+
+    fun setFocusedScreenStyle(player: Player, requestedStyle: String): StyleResult {
+        val screen = findFocusedScreen(player) ?: return StyleResult.NotLookingScreen
+        val guildId = screen.guildId ?: screen.secondaryGuildId ?: return StyleResult.NoGuild
+
+        val resolved = guildConfigService.resolveSupportedLayout(requestedStyle) ?: return StyleResult.InvalidStyle
+        val applied = guildConfigService.setGuildLayout(guildId, resolved) ?: return StyleResult.InvalidStyle
+
+        allScreens().forEach { existing ->
+            if (existing.guildId == guildId || existing.secondaryGuildId == guildId) {
+                markDirty(existing.id)
+            }
+        }
+
+        return StyleResult.Success(applied)
     }
 
     fun markDirty(screenId: String) {
@@ -530,21 +580,6 @@ class ScreenManager(
 
         if (restored > 0) {
             markDirty(screen.id)
-            if (shouldLogInfo(screen.id)) {
-                plugin.logger.info("[InterDC] Restored $restored missing frame(s) for screen ${screen.id}.")
-            }
-        }
-    }
-
-    private fun shouldLogInfo(screenId: String): Boolean {
-        val now = System.currentTimeMillis()
-        synchronized(lastRestoreInfoLogAt) {
-            val last = lastRestoreInfoLogAt[screenId] ?: 0L
-            if (now - last < 12_000L) {
-                return false
-            }
-            lastRestoreInfoLogAt[screenId] = now
-            return true
         }
     }
 

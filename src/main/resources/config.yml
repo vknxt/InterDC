@@ -37,6 +37,59 @@ messages:
   use-client-locale: true
 
 # ------------------------------------------------------------
+# Render / Visual Style
+# ------------------------------------------------------------
+render:
+  # Default visual style used for new guild theme files.
+  # Available: discord | glass | classic
+  default-style: "discord"
+
+  # Rendering quality profile.
+  # quality = best visuals, performance = lower CPU, balanced = mixed
+  # Available: quality | balanced | performance
+  performance-mode: "balanced"
+
+# ------------------------------------------------------------
+# Metrics / Observability
+# ------------------------------------------------------------
+metrics:
+  # Enables internal metrics collection.
+  enabled: false
+
+  # Maximum distinct guild labels exposed in metrics before collapsing into __other__.
+  guild-labels-limit: 50
+
+  prometheus:
+    # Expose Prometheus scrape endpoint using embedded HTTP server.
+    enabled: false
+    host: "0.0.0.0"
+    port: 9464
+    path: "/metrics"
+
+# ------------------------------------------------------------
+# Feature Flags
+# ------------------------------------------------------------
+feature-flags:
+  # Enable event coalescing worker for Discord updates.
+  discord-event-coalescer: true
+
+  # Enable metrics service lifecycle (must also set metrics.enabled).
+  metrics-service: true
+
+# ------------------------------------------------------------
+# Debug / Diagnostics
+# ------------------------------------------------------------
+debug:
+  # Master debug switch.
+  enabled: false
+
+  # Detailed coalescer/event logs.
+  discord-events: false
+
+  # Storage startup diagnostics.
+  storage: false
+
+# ------------------------------------------------------------
 # Screen Settings
 # ------------------------------------------------------------
 screen:
@@ -47,6 +100,10 @@ screen:
 
   # Max interaction distance (blocks) when targeting the panel.
   interaction-distance: 10
+
+  # Frame health checker interval in ticks.
+  # Set 0 to disable automatic frame restoration checks.
+  frame-health-check-interval-ticks: 100
 
 # ------------------------------------------------------------
 # Fly Assist

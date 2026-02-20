@@ -24,6 +24,73 @@ class GuildConfigService(private val plugin: InterDCPlugin) {
     private var storage: SQLiteStorage? = null
 
     private val serversDirectory = File(plugin.dataFolder, "servers")
+    private val supportedLayouts = setOf("discord", "glass", "classic")
+
+    fun supportedLayouts(): Set<String> {
+        return supportedLayouts
+    }
+
+    fun renderPerformanceMode(): String {
+        return when (plugin.config.getString("render.performance-mode", "balanced")?.trim()?.lowercase()) {
+            "quality" -> "quality"
+            "performance" -> "performance"
+            else -> "balanced"
+        }
+    }
+
+    private fun normalizeLayout(raw: String?): String {
+        return when (raw?.trim()?.lowercase()) {
+            "glass" -> "glass"
+            "classic" -> "classic"
+            else -> "discord"
+        }
+    }
+
+    fun resolveSupportedLayout(raw: String?): String? {
+        val normalized = raw?.trim()?.lowercase() ?: return null
+        return if (normalized in supportedLayouts) normalized else null
+    }
+
+    fun setGuildLayout(guildId: String, rawLayout: String): String? {
+        val resolved = resolveSupportedLayout(rawLayout) ?: return null
+        val current = getTheme(guildId)
+
+        val file = File(serversDirectory, "$guildId.yml")
+        if (!file.exists()) {
+            file.parentFile?.mkdirs()
+            file.createNewFile()
+        }
+        val config = YamlConfiguration.loadConfiguration(file)
+        config.set("theme.primary", colorToHex(current.primaryColor))
+        config.set("theme.background", colorToHex(current.backgroundColor))
+        config.set("theme.sidebar", colorToHex(current.sidebarColor))
+        config.set("theme.message", colorToHex(current.messageColor))
+        config.set("show-voice-channels", current.showVoiceChannels)
+        config.set("layout", resolved)
+        config.save(file)
+
+        storage?.let { db ->
+            runCatching {
+                db.saveGuildTheme(
+                    SQLiteStorage.StoredGuildTheme(
+                        guildId = guildId,
+                        primaryHex = colorToHex(current.primaryColor),
+                        backgroundHex = colorToHex(current.backgroundColor),
+                        sidebarHex = colorToHex(current.sidebarColor),
+                        messageHex = colorToHex(current.messageColor),
+                        showVoiceChannels = current.showVoiceChannels,
+                        layout = resolved
+                    )
+                )
+            }
+        }
+
+        return resolved
+    }
+
+    private fun defaultLayout(): String {
+        return normalizeLayout(plugin.config.getString("render.default-style", "discord"))
+    }
 
     fun ensureServersDirectory() {
         if (!serversDirectory.exists()) {
@@ -47,7 +114,7 @@ class GuildConfigService(private val plugin: InterDCPlugin) {
                     sidebarColor = parseHexColor(existing.sidebarHex, Color.fromRGB(0x2B, 0x2D, 0x31)),
                     messageColor = parseHexColor(existing.messageHex, Color.fromRGB(0x31, 0x33, 0x38)),
                     showVoiceChannels = existing.showVoiceChannels,
-                    layout = existing.layout
+                    layout = normalizeLayout(existing.layout)
                 )
             }
         }
@@ -59,7 +126,7 @@ class GuildConfigService(private val plugin: InterDCPlugin) {
             defaults.set("theme.background", "#1E1F22")
             defaults.set("theme.sidebar", "#2B2D31")
             defaults.set("theme.message", "#313338")
-            defaults.set("layout", "discord")
+            defaults.set("layout", defaultLayout())
             defaults.set("show-voice-channels", true)
             defaults.save(file)
         }
@@ -71,7 +138,7 @@ class GuildConfigService(private val plugin: InterDCPlugin) {
             sidebarColor = parseHexColor(config.getString("theme.sidebar"), Color.fromRGB(0x2B, 0x2D, 0x31)),
             messageColor = parseHexColor(config.getString("theme.message"), Color.fromRGB(0x31, 0x33, 0x38)),
             showVoiceChannels = config.getBoolean("show-voice-channels", true),
-            layout = config.getString("layout", "discord") ?: "discord"
+            layout = normalizeLayout(config.getString("layout", defaultLayout()))
         )
 
         if (db != null) {
@@ -100,7 +167,7 @@ class GuildConfigService(private val plugin: InterDCPlugin) {
             sidebarColor = Color.fromRGB(0x2B, 0x2D, 0x31),
             messageColor = Color.fromRGB(0x31, 0x33, 0x38),
             showVoiceChannels = true,
-            layout = "discord"
+            layout = defaultLayout()
         )
     }
 
@@ -145,7 +212,7 @@ class GuildConfigService(private val plugin: InterDCPlugin) {
                     sidebarColor = parseHexColor(config.getString("theme.sidebar"), Color.fromRGB(0x2B, 0x2D, 0x31)),
                     messageColor = parseHexColor(config.getString("theme.message"), Color.fromRGB(0x31, 0x33, 0x38)),
                     showVoiceChannels = config.getBoolean("show-voice-channels", true),
-                    layout = config.getString("layout", "discord") ?: "discord"
+                    layout = normalizeLayout(config.getString("layout", defaultLayout()))
                 )
 
                 runCatching {

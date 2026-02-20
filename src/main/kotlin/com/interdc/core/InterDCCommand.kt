@@ -1,6 +1,7 @@
 package com.interdc.core
 
 import com.interdc.InterDCPlugin
+import com.interdc.render.ScreenTileRenderer
 import com.interdc.screen.ScreenManager
 import org.bukkit.command.Command
 import org.bukkit.command.CommandExecutor
@@ -41,6 +42,9 @@ class InterDCCommand(
             "create" -> handleCreate(sender, args)
             "link" -> handleLink(sender, args)
             "link2" -> handleLink2(sender, args)
+            "style" -> handleStyle(sender, args)
+            "perf" -> handlePerf(sender)
+            "health" -> handleHealth(sender)
             "lockchannel" -> handleLockChannel(sender, args)
             "webhook" -> handleWebhook(sender, args)
             "remove" -> handleRemove(sender)
@@ -60,7 +64,7 @@ class InterDCCommand(
         if (args.size == 1) {
             val subcommands = mutableListOf("lang")
             if (sender.hasPermission("interdc.admin")) {
-                subcommands.addAll(listOf("create", "link", "link2", "lockchannel", "webhook", "remove", "reload", "move"))
+                subcommands.addAll(listOf("create", "link", "link2", "style", "perf", "health", "lockchannel", "webhook", "remove", "reload", "move"))
             }
             return subcommands
                 .filter { it.startsWith(args[0], ignoreCase = true) }
@@ -77,6 +81,12 @@ class InterDCCommand(
 
         if (args.size == 2 && args[0].equals("lockchannel", ignoreCase = true)) {
             return listOf("on", "off")
+                .filter { it.startsWith(args[1], ignoreCase = true) }
+                .toMutableList()
+        }
+
+        if (args.size == 2 && args[0].equals("style", ignoreCase = true)) {
+            return listOf("discord", "glass", "ultra", "classic")
                 .filter { it.startsWith(args[1], ignoreCase = true) }
                 .toMutableList()
         }
@@ -244,6 +254,58 @@ class InterDCCommand(
         messageService.send(sender, "linked", mapOf("channel" to channelId))
     }
 
+    private fun handleStyle(sender: CommandSender, args: Array<out String>) {
+        val player = sender as? Player ?: run {
+            messageService.send(sender, "only-player")
+            return
+        }
+
+        val result = if (args.size >= 2) {
+            screenManager.setFocusedScreenStyle(player, args[1])
+        } else {
+            screenManager.cycleFocusedScreenStyle(player)
+        }
+
+        when (result) {
+            ScreenManager.StyleResult.NotLookingScreen -> {
+                messageService.send(sender, "not-looking-screen")
+            }
+
+            ScreenManager.StyleResult.NoGuild -> {
+                messageService.send(sender, "style-no-guild")
+            }
+
+            ScreenManager.StyleResult.InvalidStyle -> {
+                messageService.send(sender, "style-invalid")
+            }
+
+            is ScreenManager.StyleResult.Success -> {
+                messageService.send(sender, "style-set", mapOf("style" to result.style))
+            }
+        }
+    }
+
+    private fun handlePerf(sender: CommandSender) {
+        val snapshot = ScreenTileRenderer.metricsSnapshot()
+        val hits = snapshot.cacheHits
+        val misses = snapshot.cacheMisses
+        val totalLookups = hits + misses
+        val hitRate = if (totalLookups <= 0L) 0.0 else (hits.toDouble() * 100.0) / totalLookups.toDouble()
+
+        messageService.send(
+            sender,
+            "perf-stats",
+            mapOf(
+                "requests" to snapshot.requests.toString(),
+                "hits" to hits.toString(),
+                "misses" to misses.toString(),
+                "hitRate" to "%.1f".format(hitRate),
+                "renders" to snapshot.renderCount.toString(),
+                "avgMs" to "%.2f".format(snapshot.avgRenderMs)
+            )
+        )
+    }
+
     private fun handleRemove(sender: CommandSender) {
         val player = sender as? Player ?: run {
             messageService.send(sender, "only-player")
@@ -261,8 +323,30 @@ class InterDCCommand(
     private fun handleReload(sender: CommandSender) {
         plugin.reloadConfig()
         messageService.reload()
+        plugin.refreshRuntimeServices()
         screenManager.reloadScreens()
         messageService.send(sender, "reloaded")
+    }
+
+    private fun handleHealth(sender: CommandSender) {
+        val health = plugin.healthSnapshot()
+        messageService.send(
+            sender,
+            "health-stats",
+            mapOf(
+                "status" to health.status,
+                "screens" to health.screens.toString(),
+                "discord" to "${health.discordMode}:${if (health.discordConnected) "up" else "down"}",
+                "guilds" to health.guilds.toString(),
+                "db" to if (health.dbOk) "ok" else "fail",
+                "hitRate" to "%.1f".format(health.cacheHitRate),
+                "queue" to health.coalescerQueueDepth.toString(),
+                "batches" to health.coalescerFlushedBatches.toString(),
+                "events" to health.coalescerFlushedEvents.toString(),
+                "flags" to "coalescer=${health.featureCoalescerEnabled},metrics=${health.featureMetricsEnabled}",
+                "debug" to health.debugEnabled.toString()
+            )
+        )
     }
 
     private fun handleMove(sender: CommandSender) {

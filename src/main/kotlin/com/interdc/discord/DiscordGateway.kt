@@ -145,13 +145,26 @@ class JdaDiscordGateway(
     private val token: String
 ) : DiscordGateway {
 
+    companion object {
+        private const val CHANNEL_CACHE_TTL_MS = 5_000L
+        private const val MEMBER_CACHE_TTL_MS = 15_000L
+        private const val MEMBER_CACHE_SIZE = 80
+    }
+
     private val listeners = CopyOnWriteArrayList<DiscordUpdateListener>()
     private val guildStore = ConcurrentHashMap<String, DiscordGuild>()
     private val channelStore = ConcurrentHashMap<String, List<DiscordChannel>>()
     private val memberStore = ConcurrentHashMap<String, List<DiscordMember>>()
+    private val channelStoreUpdatedAt = ConcurrentHashMap<String, Long>()
+    private val memberStoreUpdatedAt = ConcurrentHashMap<String, Long>()
     private val webhookStore = ConcurrentHashMap<String, String>()
     private val http = HttpClient.newHttpClient()
     private var jda: JDA? = null
+
+    fun isConnected(): Boolean {
+        val status = jda?.status ?: return false
+        return status == JDA.Status.CONNECTED || status == JDA.Status.LOADING_SUBSYSTEMS
+    }
 
     override fun start() {
         if (jda != null) {
@@ -247,6 +260,8 @@ class JdaDiscordGateway(
         val instance = jda
         jda = null
         webhookStore.clear()
+        channelStoreUpdatedAt.clear()
+        memberStoreUpdatedAt.clear()
         if (instance != null) {
             instance.shutdown()
             runCatching {
@@ -272,52 +287,16 @@ class JdaDiscordGateway(
     override fun channels(guildId: String): List<DiscordChannel> {
         val jdaGuild = jda?.getGuildById(guildId)
         if (jdaGuild != null) {
-            data class OrderedChannel(
-                val channel: DiscordChannel,
-                val categoryPosition: Int,
-                val channelPosition: Int
-            )
-
-            val text = jdaGuild.textChannels.map {
-                OrderedChannel(
-                    channel = DiscordChannel(
-                        id = it.id,
-                        guildId = guildId,
-                        name = it.name,
-                        isVoice = false,
-                        categoryName = it.parentCategory?.name,
-                        canView = isPublicViewAllowed(it),
-                        canTalk = it.canTalk() && isPublicSendAllowed(it)
-                    ),
-                    categoryPosition = it.parentCategory?.positionRaw ?: Int.MIN_VALUE,
-                    channelPosition = it.positionRaw
-                )
-            }
-            val voice = jdaGuild.voiceChannels.map {
-                OrderedChannel(
-                    channel = DiscordChannel(
-                        id = it.id,
-                        guildId = guildId,
-                        name = it.name,
-                        isVoice = true,
-                        categoryName = it.parentCategory?.name,
-                        canView = isPublicViewAllowed(it),
-                        canTalk = false
-                    ),
-                    categoryPosition = it.parentCategory?.positionRaw ?: Int.MIN_VALUE,
-                    channelPosition = it.positionRaw
-                )
+            val now = System.currentTimeMillis()
+            val cached = channelStore[guildId]
+            val updatedAt = channelStoreUpdatedAt[guildId] ?: 0L
+            if (cached != null && now - updatedAt <= CHANNEL_CACHE_TTL_MS) {
+                return cached
             }
 
-            val merged = (text + voice)
-                .filter { it.channel.canView }
-                .sortedWith(
-                    compareBy<OrderedChannel> { it.categoryPosition }
-                        .thenBy { if (it.channel.isVoice) 1 else 0 }
-                        .thenBy { it.channelPosition }
-                )
-                .map { it.channel }
+            val merged = collectChannels(jdaGuild)
             channelStore[guildId] = merged
+            channelStoreUpdatedAt[guildId] = now
             cacheHub.channelCache.put(guildId, merged)
             return merged
         }
@@ -329,24 +308,18 @@ class JdaDiscordGateway(
     override fun members(guildId: String, limit: Int): List<DiscordMember> {
         val jdaGuild = jda?.getGuildById(guildId)
         if (jdaGuild != null) {
-            val liveMembers = jdaGuild.members
-                .sortedBy { it.effectiveName.lowercase() }
-                .map { member ->
-                    DiscordMember(
-                        id = member.id,
-                        name = member.effectiveName,
-                        roles = member.roles
-                            .filter { !it.isPublicRole }
-                            .map { it.name }
-                            .take(2),
-                        avatarUrl = member.effectiveAvatarUrl
-                    )
-                }
-                .take(limit)
+            val now = System.currentTimeMillis()
+            val cached = memberStore[guildId]
+            val updatedAt = memberStoreUpdatedAt[guildId] ?: 0L
+            if (cached != null && now - updatedAt <= MEMBER_CACHE_TTL_MS) {
+                return cached.take(limit)
+            }
 
+            val liveMembers = collectMembers(jdaGuild, MEMBER_CACHE_SIZE)
             if (liveMembers.isNotEmpty()) {
                 memberStore[guildId] = liveMembers
-                return liveMembers
+                memberStoreUpdatedAt[guildId] = now
+                return liveMembers.take(limit)
             }
         }
 
@@ -385,12 +358,26 @@ class JdaDiscordGateway(
         val guild = jda?.getGuildById(guildId) ?: return
         guildStore[guild.id] = DiscordGuild(guild.id, guild.name, guild.iconUrl)
 
-        data class OrderedChannel(
-            val channel: DiscordChannel,
-            val categoryPosition: Int,
-            val channelPosition: Int
-        )
+        val now = System.currentTimeMillis()
+        val channels = collectChannels(guild)
+        channelStore[guild.id] = channels
+        channelStoreUpdatedAt[guild.id] = now
+        cacheHub.channelCache.put(guild.id, channels)
 
+        val members = collectMembers(guild, MEMBER_CACHE_SIZE)
+        if (members.isNotEmpty()) {
+            memberStore[guild.id] = members
+            memberStoreUpdatedAt[guild.id] = now
+        }
+    }
+
+    private data class OrderedChannel(
+        val channel: DiscordChannel,
+        val categoryPosition: Int,
+        val channelPosition: Int
+    )
+
+    private fun collectChannels(guild: net.dv8tion.jda.api.entities.Guild): List<DiscordChannel> {
         val text = guild.textChannels.map {
             OrderedChannel(
                 channel = DiscordChannel(
@@ -406,6 +393,7 @@ class JdaDiscordGateway(
                 channelPosition = it.positionRaw
             )
         }
+
         val voice = guild.voiceChannels.map {
             OrderedChannel(
                 channel = DiscordChannel(
@@ -421,7 +409,8 @@ class JdaDiscordGateway(
                 channelPosition = it.positionRaw
             )
         }
-        val channels = (text + voice)
+
+        return (text + voice)
             .filter { it.channel.canView }
             .sortedWith(
                 compareBy<OrderedChannel> { it.categoryPosition }
@@ -429,23 +418,23 @@ class JdaDiscordGateway(
                     .thenBy { it.channelPosition }
             )
             .map { it.channel }
-        channelStore[guild.id] = channels
-        cacheHub.channelCache.put(guild.id, channels)
+    }
 
-        val members = guild.members
+    private fun collectMembers(guild: net.dv8tion.jda.api.entities.Guild, limit: Int): List<DiscordMember> {
+        return guild.members
             .sortedBy { it.effectiveName.lowercase() }
             .map { member ->
                 DiscordMember(
                     id = member.id,
                     name = member.effectiveName,
-                    roles = member.roles.filter { !it.isPublicRole }.map { it.name }.take(2),
+                    roles = member.roles
+                        .filter { !it.isPublicRole }
+                        .map { it.name }
+                        .take(2),
                     avatarUrl = member.effectiveAvatarUrl
                 )
             }
-            .take(20)
-        if (members.isNotEmpty()) {
-            memberStore[guild.id] = members
-        }
+            .take(limit)
     }
 
     private fun resolveOrCreateWebhookUrl(channel: TextChannel): String? {

@@ -27,6 +27,12 @@ class SQLiteStorage(private val plugin: InterDCPlugin) {
         plugin.dataFolder.mkdirs()
         connection().use { conn ->
             conn.createStatement().use { st ->
+                st.execute("PRAGMA journal_mode=WAL")
+                st.execute("PRAGMA synchronous=NORMAL")
+                st.execute("PRAGMA foreign_keys=ON")
+                st.execute("PRAGMA busy_timeout=5000")
+                st.execute("PRAGMA temp_store=MEMORY")
+                st.execute("PRAGMA cache_size=-20000")
                 st.executeUpdate(
                     """
                     CREATE TABLE IF NOT EXISTS screens (
@@ -74,10 +80,28 @@ class SQLiteStorage(private val plugin: InterDCPlugin) {
                     """.trimIndent()
                 )
                 st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_discord_messages_channel_id ON discord_messages(channel_id)")
+                st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_screens_guild_id ON screens(guild_id)")
+                st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_screens_secondary_guild_id ON screens(secondary_guild_id)")
+                st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_screens_channel_id ON screens(channel_id)")
+                st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_screens_secondary_channel_id ON screens(secondary_channel_id)")
             }
 
             ensureScreensColumns(conn)
         }
+
+        if (plugin.config.getBoolean("debug.enabled", false) && plugin.config.getBoolean("debug.storage", false)) {
+            plugin.logger.info("[InterDC] SQLite initialized at ${dbFile.absolutePath}")
+        }
+    }
+
+    fun ping(): Boolean {
+        return runCatching {
+            connection().use { conn ->
+                conn.prepareStatement("SELECT 1").use { ps ->
+                    ps.executeQuery().use { rs -> rs.next() }
+                }
+            }
+        }.getOrDefault(false)
     }
 
     private fun ensureScreensColumns(conn: Connection) {
@@ -343,7 +367,16 @@ class SQLiteStorage(private val plugin: InterDCPlugin) {
     }
 
     private fun connection(): Connection {
-        return DriverManager.getConnection(jdbcUrl)
+        return DriverManager.getConnection(jdbcUrl).apply {
+            createStatement().use { st ->
+                st.execute("PRAGMA journal_mode=WAL")
+                st.execute("PRAGMA synchronous=NORMAL")
+                st.execute("PRAGMA foreign_keys=ON")
+                st.execute("PRAGMA busy_timeout=5000")
+                st.execute("PRAGMA temp_store=MEMORY")
+                st.execute("PRAGMA cache_size=-20000")
+            }
+        }
     }
 
     private fun encodeSupportBlocks(values: List<String>): String {
