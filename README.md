@@ -4,8 +4,6 @@ Bring your Discord server directly into Minecraft using interactive in-world scr
 
 InterDC integrates Discord channels into physical map panels inside the game, with Java + Bedrock support, live updates, and localized UX.
 
-![InterDC Showcase](https://i.imgur.com/KDMtWK2.gif)
-
 ---
 
 ## Project Status
